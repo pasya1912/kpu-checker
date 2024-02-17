@@ -2,6 +2,57 @@ const https = require('https');
 const fs = require('fs');
 const readlineSync = require('readline-sync');
 
+async function getKelurahanByKecamatan(provinsi,kota,kecamatan) {
+    return new Promise((resolve, reject) => {
+        const options = {
+            hostname: 'sirekap-obj-data.kpu.go.id',
+            path: `/wilayah/pemilu/ppwp/${provinsi}/${kota}/${kecamatan}.json`,
+            headers: {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cache-Control': 'max-age=0',
+                'Connection': 'keep-alive',
+                'Cookie': '_gid=GA1.3.892451691.1708065271; _ga=GA1.1.1201254762.1707998431; _ga_K51LBJNM4Z=GS1.1.1708065271.1.1.1708065301.0.0.0; _ga_JWWVFX0SJ1=GS1.1.1708145017.4.1.1708145438.0.0.0',
+                'If-Modified-Since': 'Fri, 16 Feb 2024 02:30:49 GMT',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0',
+                'sec-ch-ua': '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"'
+            }
+        };
+
+        const req = https.get(options, function (res) {
+            const chunks = [];
+
+            res.on('data', function (chunk) {
+                chunks.push(chunk);
+            });
+
+
+            res.on('end', function () {
+                const body = Buffer.concat(chunks);
+
+                try {
+                    const result = JSON.parse(body.toString());
+
+                    if (result) {
+                        resolve(result);
+                    } else {
+                        reject(body.toString());
+                    }
+                } catch (e) {
+                    reject(body.toString());
+                }
+            });
+        });
+    });
+}
+
 async function getTpsKelurahan(prov, kota, kecamatan, kelurahan) {
     return new Promise((resolve, reject) => {
         const options = {
@@ -100,7 +151,7 @@ function getData(prov, kota, kecamatan, kelurahan, kodeTps) {
         });
     });
 }
-function saveResult(data,filename){
+function saveResult(data, filename) {
     const filePath = filename;
     const dataToAppend = data + "\n";
 
@@ -114,7 +165,6 @@ function saveResult(data,filename){
         // Append data to the file
         fs.appendFileSync(filePath, dataToAppend);
 
-        console.log('Data appended successfully.');
     } catch (err) {
         console.error('Error appending data to file:', err);
     }
@@ -153,7 +203,7 @@ async function deleteDuplicateLines(filename) {
 
 function isFraud(data) {
 
-    if (!data.chart) {
+    if (!data.chart || (!data.chart["100025"] && !data.chart["100026"] && !data.chart["100027"])){
         console.log("Data masih diproses...");
         return 0;
     }
@@ -176,7 +226,7 @@ function isFraud(data) {
 
     let suaraSah = data.administrasi.suara_sah;
 
-    if (anis + prabowo + ganjar != suaraSah ) {
+    if (anis + prabowo + ganjar != suaraSah) {
         console.log("Terdapat perbedaan data !");
         console.log("Anis: " + anis);
         console.log("Prabowo: " + prabowo);
@@ -190,11 +240,49 @@ function isFraud(data) {
         return 0;
     }
 }
+
+async function getPerKelurahan(provinsi, kota, kecamatan, kelurahan) {
+    const result = await getTpsKelurahan(provinsi, kota, kecamatan, kelurahan);
+    console.log("Terdapat " + result.length + " Tps");
+
+    // Define the batch size
+    const batchSize = 10;
+
+    // Function to process a batch of promises
+    const processBatch = async (batch) => {
+        return Promise.all(batch.map(async (tps) => {
+            console.log("===========");
+            console.log(tps.nama);
+            let frauded = isFraud(await getData(provinsi, kota, kecamatan, kelurahan, tps.kode));
+            if (frauded) {
+                switch (frauded) {
+                    case 1:
+                        saveResult("https://pemilu2024.kpu.go.id/pilpres/hitung-suara/" + provinsi + "/" + kota + "/" + kecamatan + "/" + kelurahan + "/" + tps.kode, 'tidakCocok.txt');
+                    case 2:
+                        saveResult("https://pemilu2024.kpu.go.id/pilpres/hitung-suara/" + provinsi + "/" + kota + "/" + kecamatan + "/" + kelurahan + "/" + tps.kode, 'belumProsesSudahResult.txt');
+                    default:
+
+                        break;
+                }
+            }
+            console.log("===========");
+        }));
+    };
+
+    // Process the promises in batches
+    for (let i = 0; i < result.length; i += batchSize) {
+        const batch = result.slice(i, i + batchSize);
+        await processBatch(batch);
+    }
+}
 (async () => {
+    console.log("KPU crawler");
+    console.log("tidakCocok.txt => Data pada website kpu memiliki ketidak cocokan antara jumlah suara seluruh paslon dengan suara sah");
+    console.log("belumProsesSudahResult.txt => Data Jumlah suara tiap paslon sudah ada namun data administratif lainnya belum diproses, berpotensi menimbulkan ke tidakcocokan\n\n");
     var url;
-    const pattern = /^https:\/\/pemilu2024\.kpu\.go\.id\/pilpres\/hitung-suara\/(\d+)\/(\d+)\/(\d+)\/(\d+)\/?$/;
+    const pattern = /^https:\/\/pemilu2024\.kpu\.go\.id\/pilpres\/hitung-suara\/(\d+)\/(\d+)\/(\d+)\/?$/;
     askForUrl: while (true) {
-        url = readlineSync.question("Link KPU Kelurahan(cth: https://pemilu2024.kpu.go.id/pilpres/hitung-suara/33/3329/332915/3329152004/3329152004006): ");
+        url = readlineSync.question("Link KPU Kecamatan(cth: https://pemilu2024.kpu.go.id/pilpres/hitung-suara/33/3329/332915/3329152004): ");
 
         if (pattern.test(url)) {
             break askForUrl;
@@ -208,43 +296,20 @@ function isFraud(data) {
     const provinsi = match[1];
     const kota = match[2];
     const kecamatan = match[3];
-    const kelurahan = match[4];
+
+    var dataKelurahan = await getKelurahanByKecamatan(provinsi,kota,kecamatan);
+
+    for(let kelurahan of dataKelurahan)
+    {
+        console.log("Kelurahan : "+kelurahan.nama);
+        await getPerKelurahan(provinsi,kota,kecamatan,kelurahan.kode);
+    }
+
+
 
 
     try {
-        const result = await getTpsKelurahan(provinsi, kota, kecamatan, kelurahan);
-        console.log("Terdapat " + result.length + " Tps");
 
-        // Define the batch size
-        const batchSize = 30;
-
-        // Function to process a batch of promises
-        const processBatch = async (batch) => {
-            return Promise.all(batch.map(async (tps) => {
-                console.log("===========");
-                console.log(tps.nama);
-                let frauded = isFraud(await getData(provinsi, kota, kecamatan, kelurahan, tps.kode));
-                if (frauded) {
-                    switch(frauded)
-                    {
-                        case 1:
-                            saveResult("https://pemilu2024.kpu.go.id/pilpres/hitung-suara/" + provinsi + "/" + kota + "/" + kecamatan + "/" + kelurahan + "/" + tps.kode,'tidakCocok.txt');
-                        case 2:
-                            saveResult("https://pemilu2024.kpu.go.id/pilpres/hitung-suara/" + provinsi + "/" + kota + "/" + kecamatan + "/" + kelurahan + "/" + tps.kode,'belumProsesSudahResult.txt');
-                        default:
-
-                        break;
-                    }
-                }
-                console.log("===========");
-            }));
-        };
-
-        // Process the promises in batches
-        for (let i = 0; i < result.length; i += batchSize) {
-            const batch = result.slice(i, i + batchSize);
-            await processBatch(batch);
-        }
         deleteDuplicateLines('tidakCocok.txt');
         deleteDuplicateLines('belumProsesSudahResult.txt');
         console.log("Proses Pengecekan selesai...")
